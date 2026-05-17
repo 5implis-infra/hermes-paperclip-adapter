@@ -169,3 +169,146 @@ export function resolveProvider(options: {
   // 4. Let Hermes auto-detect
   return { provider: "auto", resolvedFrom: "auto" };
 }
+
+// ---- Custom Providers Support ----
+
+export interface CustomProvider {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  defaultModel?: string;
+}
+
+/**
+ * Parse custom_providers section from Hermes config YAML.
+ */
+export function parseCustomProviders(content: string): CustomProvider[] {
+  const lines = content.split("\n");
+  const providers: CustomProvider[] = [];
+  let inCustomProviders = false;
+  let currentProvider: Partial<CustomProvider> | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    const indent = line.length - line.trimStart().length;
+
+    if (/^custom_providers:\s*$/.test(trimmed) && indent === 0) {
+      inCustomProviders = true;
+      continue;
+    }
+
+    if (inCustomProviders) {
+      // Exit section if indent returns to 0 and line is not a list item
+      if (indent === 0 && trimmed && !trimmed.startsWith("-") && !trimmed.startsWith("#")) {
+        inCustomProviders = false;
+        if (currentProvider?.name && currentProvider?.baseUrl) {
+          providers.push(currentProvider as CustomProvider);
+        }
+        currentProvider = null;
+        continue;
+      }
+
+      // New list item: "- name: litellm"
+      const nameMatch = trimmed.match(/^-\s+name:\s*(.+)$/);
+      if (nameMatch) {
+        if (currentProvider?.name && currentProvider?.baseUrl) {
+          providers.push(currentProvider as CustomProvider);
+        }
+        currentProvider = { name: nameMatch[1].trim() };
+        continue;
+      }
+
+      if (currentProvider) {
+        const kvMatch = trimmed.match(/^\s*(\w+)\s*:\s*(.+)$/);
+        if (kvMatch) {
+          const key = kvMatch[1];
+          const val = kvMatch[2].trim().replace(/#.*$/, "").trim().replace(/^['"]|['"]$/g, "");
+          if (key === "base_url") currentProvider.baseUrl = val;
+          if (key === "api_key") currentProvider.apiKey = val;
+          if (key === "model") currentProvider.defaultModel = val;
+        }
+      }
+    }
+  }
+
+  if (currentProvider?.name && currentProvider?.baseUrl) {
+    providers.push(currentProvider as CustomProvider);
+  }
+
+  return providers;
+}
+
+/**
+ * Fetch available models from a custom provider's /v1/models endpoint
+ * (OpenAI-compatible API).
+ */
+async function fetchModelsFromProvider(
+  provider: CustomProvider,
+): Promise<{ id: string; label: string }[]> {
+  const url = provider.baseUrl.replace(/\/+$/, "") + "/models";
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (provider.apiKey) {
+      headers["Authorization"] = `Bearer ${provider.apiKey}`;
+    }
+    const resp = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as any;
+    const models = data?.data;
+    if (!Array.isArray(models)) return [];
+    return models
+      .filter((m: any) => m.id && typeof m.id === "string")
+      .map((m: any) => ({ id: m.id, label: m.id }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List all available models from Hermes config (custom providers + default model).
+ * This is the main entry point for Paperclip's listAdapterModels().
+ */
+export async function listModels(): Promise<{ id: string; label: string }[]> {
+  const configPath = join(homedir(), ".hermes", "config.yaml");
+  let content: string;
+  try {
+    content = await readFile(configPath, "utf-8");
+  } catch {
+    return [];
+  }
+
+  const customProviders = parseCustomProviders(content);
+  const defaultConfig = parseModelFromConfig(content);
+
+  const allModels: { id: string; label: string }[] = [];
+  const seen = new Set<string>();
+
+  // Add default model first
+  if (defaultConfig?.model && !seen.has(defaultConfig.model)) {
+    seen.add(defaultConfig.model);
+    allModels.push({ id: defaultConfig.model, label: defaultConfig.model });
+  }
+
+  // Fetch from custom providers in parallel
+  const providerPromises = customProviders.map(async (provider) => {
+    const models = await fetchModelsFromProvider(provider);
+    // Also add the provider's default model if specified
+    if (provider.defaultModel && !seen.has(provider.defaultModel)) {
+      seen.add(provider.defaultModel);
+      allModels.push({ id: provider.defaultModel, label: provider.defaultModel });
+    }
+    return models;
+  });
+
+  const results = await Promise.all(providerPromises);
+  for (const models of results) {
+    for (const model of models) {
+      if (!seen.has(model.id)) {
+        seen.add(model.id);
+        allModels.push(model);
+      }
+    }
+  }
+
+  return allModels;
+}

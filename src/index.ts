@@ -15,6 +15,12 @@ export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 
 /**
+ * Key in adapterConfig that holds the path to an instructions file.
+ * When set, Paperclip UI enables the instructions editor for this adapter.
+ */
+export const instructionsPathKey = "instructionsFilePath";
+
+/**
  * Models available through Hermes Agent.
  *
  * Hermes supports any model via any provider. The Paperclip UI should

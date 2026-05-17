@@ -31,6 +31,8 @@ import {
   ensureAbsoluteDirectory,
 } from "@paperclipai/adapter-utils/server-utils";
 
+import { readFile } from "node:fs/promises";
+
 import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
@@ -123,12 +125,22 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
-function buildPrompt(
+async function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-): string {
-  const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
+): Promise<string> {
+  // Read custom instructions file if configured
+  let instructionsContent = "";
+  const instructionsPath = cfgString(config.instructionsFilePath);
+  if (instructionsPath) {
+    try {
+      instructionsContent = await readFile(instructionsPath, "utf-8");
+    } catch {
+      // Non-fatal: file may not exist yet
+    }
+  }
 
+  const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
   const taskId = cfgString(ctx.config?.taskId);
   const taskTitle = cfgString(ctx.config?.taskTitle) || "";
   const taskBody = cfgString(ctx.config?.taskBody) || "";
@@ -185,7 +197,13 @@ function buildPrompt(
   );
 
   // Replace remaining {{variable}} placeholders
-  return renderTemplate(rendered, vars);
+  const finalPrompt = renderTemplate(rendered, vars);
+
+  // Prepend custom instructions if provided
+  if (instructionsContent) {
+    return instructionsContent + "\n\n" + finalPrompt;
+  }
+  return finalPrompt;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +373,7 @@ export async function execute(
   });
 
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const prompt = await buildPrompt(ctx, config);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line

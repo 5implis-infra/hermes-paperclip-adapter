@@ -26,6 +26,7 @@ export const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
  */
 export const VALID_PROVIDERS = [
   "auto",
+  "custom",
   "openrouter",
   "nous",
   "openai-codex",
